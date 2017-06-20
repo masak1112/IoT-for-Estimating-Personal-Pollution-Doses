@@ -49,10 +49,10 @@ class create_new_sensor(object):
                 """
                 This function aims to save a data frame into MySQL
                 """
-                #dbServer = "http://138.100.82.183"
-                #dbPass = "tian.2016"
-                #dbSchema = "cmadrid"
-                engine = create_engine('mysql+mysqlconnector://cmadrid:tian.2016@138.100.82.183:3306/madrid_pollution', echo=False)
+                #dbServer = "***"
+                #dbPass = "***"
+                #dbSchema = "***"
+                engine = create_engine('*****', echo=False)
                 datapoints_df.to_sql(name=table_name, con=engine, if_exists = 'append', index=False)
 
         def is_new_sensor(self):
@@ -60,7 +60,7 @@ class create_new_sensor(object):
                 test if the device a new sensor
                 """
                 #db=mysql.connect()
-                db = MySQLdb.connect(host="138.100.82.183",user="cmadrid",passwd="tian.2016",db="madrid_pollution")
+                db = MySQLdb.connect(host="***",user="***",passwd="***",db="***")
                 cur = db.cursor()
                 cur.execute("select devid from SensorConfiguration where devid= %s", [self.uuid])
                 data = cur.fetchall()
@@ -182,8 +182,8 @@ def main(argv):
         global averageBy 
 	global yesterday
 	accept = "application/json;charset=UTF-8"
-	api_token = "eyJhbGciOiJIUzI1NiJ9.eyJncmFudGVlIjoiZ29uZ2JpbmcxMTEyQGdtYWlsLmNvbSIsImlhdCI6MTQ3OTgwNTA4MiwidmFsaWRpdHkiOi0xLCJqdGkiOiJlMmYyZjE1ZS00ODgxLTQxMDItYmFiNy04NjExOTgxNWE1NmMiLCJwZXJtaXNzaW9ucyI6WyJ1c2VyOnJlYWQiLCJkZXZpY2U6cmVhZCJdLCJxdW90YSI6MjAwLCJyYXRlTGltaXQiOjV9.MfNT6f-o7S2A_tvBFbQ1k3-61lDvconmVl7zdyjOP5k"
-	user = "gongbing1112@gmail.com"
+	api_token = "********"
+	user = "your registed email"
 	type_sensor= "foobot"
 	location = "F1_R1"
 	yesterday =date.today() - timedelta(1)
