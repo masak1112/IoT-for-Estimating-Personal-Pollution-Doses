@@ -1,0 +1,1382 @@
+---
+title: "v1"
+author: "gongbing"
+date: "01/03/2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+pkg <- c("gstat","sp","spacetime","raster","rgdal","rgeos")
+lapply(pkg, require, character.only = TRUE)
+require("knitr")
+opts_knit$set(root.dir = "/mnt/sdb1/home/gong/Individual_expsoure")
+library(xlsx)
+library(DBI)
+library(magrittr)
+library(RODBC)
+library(RMySQL)
+library(data.table)
+library(Hmisc)
+library(lubridate)
+library(zoo)
+library(readr)
+library(leaflet)
+library(png)
+library(fields) 
+library(dismo)
+home_path= getwd()
+df_path=paste0(home_path,"/df/")
+img_path=paste0(home_path,"/img/")
+xlsx_path = paste0(home_path,"/xlsx/")
+```
+
+## Prepare the dataset
+```{r cars}
+#set path to save different types of files
+DATE = "'2017-03-24'"
+POLLUTANT_CODE = 8
+##CODE : OZONE : 14; PM2.5 : 9; PM10 : 10; NO2: 8 ; CO 6; SO2
+
+df_outdoor_indoor = function(DATE,POLLUTANT_CODE){
+        #extract data from MySQL
+        m=dbDriver("MySQL")
+        con<-dbConnect(m,user="cmadrid",password="tian.2016",dbname="madrid_pollution",host="138.100.82.183")
+        start = DATE
+        end = DATE
+        
+        #get the outdoor data
+        if(file.exists(paste0(df_path,"pollutant_code",POLLUTANT_CODE,".RData")))
+                {
+                load(paste0(df_path,"pollutant_code",POLLUTANT_CODE,".RData"))
+        }else{
+           
+                sql_pollution = paste("select stations.code,stations.name,stations.lat,stations.lon, instant as date, hour, value from(select station_code, pollutant,instant, hour, value from pollution where pollutant =",POLLUTANT_CODE,"and instant between",start, "AND", end,") as foo left join stations on foo.station_code=stations.code")
+                p<-dbGetQuery(con,sql_pollution)
+                        #convert the date,time to POSIXlt format
+                p$datetime =as.POSIXct(strptime(paste(p$date,p$hour), "%Y-%m-%d %H", tz = "CET"))
+                p <- na.omit(p)
+                #convert the charaters in lat and log to geolocation
+                t_lat <- gsub("\xba","°",p$lat)
+                p$lat <- as.numeric(char2dms(t_lat, chd = "°", chm = "'", chs='"'))
+                t_lon <- gsub("\xba","°",p$lon)
+                p$lon <- as.numeric(char2dms(t_lon, chd = "°", chm = "'", chs='"'))
+                save(p, file=paste0(df_path,"pollutant_code",POLLUTANT_CODE,".RData")) 
+        }
+        
+        
+        start_time = paste(sub("'","", start),"00:00:00") 
+        start_time = paste0("'",start_time,"'")
+        end_time = paste(sub("'","", end),"00:00:00") 
+        end_time = paste0("'",end_time,"'")
+        #Get the footbot data
+        if(file.exists(paste0(df_path,"from_",start_time,"_to",end_time,".RData"))){
+                 load(paste0(df_path,"from_",start_time,"_to",end_time,".RData"))
+                
+        }else{
+                
+                sql_footbot <- paste("select time as datetime, pm, co2, voc, allpollu from foobot_samples where time between",start_time, "  and", end_time)
+                f<-dbGetQuery(con,sql_footbot)
+                f$datetime = as.POSIXct(strptime(f$datetime,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+                if(nrow(f) == 0){
+                        alarm("The data from footbot in the target period is empty.")
+                }else{
+                        save(f,file = paste0(df_path,"from_",start_time,"_to",end_time,".RData")) 
+                }
+                
+        }
+        
+         #Get the ebeacon data 
+        if(file.exist(paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))){
+                load(paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))
+        }else{
+                
+                sql_ebeacon <- paste("select timestamp as datetime from phone_beacon where timestamp between",date_start_ebeacon, "  and", date_end_ebeacon)
+                e<-dbGetQuery(con,sql_ebeacon)
+                e$datetime = as.POSIXct(strptime(e$datetime,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+                save(e,file = paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))
+        }
+        
+        if(nrow(e)!= 0L&nrow(f)!=0L&nrow(p)!=0){
+                 #merge ebeacon and footbot data 
+                e_dt = setDT(data.frame(e))
+                f_dt = setDT(data.frame(f))
+                setkey(f_dt, datetime)[, dateMatch:=datetime]
+                e_f_df = f_dt[e_dt, roll='nearest',on = c("datetime"="datetime")]#e_f_df is the data table that is merged from footbot and ebeacon for a specific data
+                save(e_f_df,file="e_f_df.RData")
+                write.xlsx(e_f_df, "e_f_df.xlsx")
+        }else{
+                warning("The data for the target date is empty.")
+        }
+   
+        
+        
+       
+        
+}
+breaks=seq(e_f_df, by=10)
+
+indoor_test <- as.data.frame(e_f_df)[,c("datetime","pm")]
+indoor_test$sumpPM = 0
+indoor_test$timeDiff = 0
+indoor_test$timeDiff[2:nrow1:(indoor_test)]<- diff(indoor_test$datetime,lag =1)
+
+for(i in 2:nrow(indoor_test)){
+        indoor_test$sumpPM[i] <- (indoor_test$pm[i-1] + indoor_test$pm[i])/2
+}
+
+VE_rest = 0.00893
+indoor_test$ve = 0
+indoor_test$ve = indoor_test$sumpPM*VE_rest *indoor_test$timeDiff
+indoor_test2<- indoor_test[47:79,]
+
+indoor_test2$ve_avg<-indoor_test2$ve/indoor_test2$timeDiff
+
+
+#Take time period as example 3/24/2017 16:09:41 3/24/2017 17:00:49 
+
+indoor_test2$datetime_round = round(indoor_test2$datetime, "mins")
+indoor_test_new =  data.frame(datetime=as.POSIXct(character()),
+                 datetime_round=as.POSIXct(character()),
+                 pm=numeric(),
+                 sumpPM=numeric(),
+                 timeDiff = numeric(),
+                 ve = numeric(),
+                 ve_avg = numeric(),
+                 stringsAsFactors=FALSE)
+index =1
+for(j in 2:nrow(indoor_test2))
+{
+        if(indoor_test2[j,"timeDiff"]>1.5){
+                for (i in 1:(round(indoor_test2$timeDiff[j])-1)){
+                     indoor_test_new[index,"datetime"] = indoor_test2[j-1,"datetime"] + i*60
+                     indoor_test_new[index,"pm"] = indoor_test2[j-1,"pm"]
+                     indoor_test_new[index,"sumpPM"] = indoor_test2[j-1,"sumpPM"]
+                     indoor_test_new[index,"timeDiff"] = indoor_test2[j-1,"timeDiff"]
+                     indoor_test_new[index,"ve"] = indoor_test2[j-1,"ve"]
+                     indoor_test_new[index,"ve_avg"] = indoor_test2[j-1,"ve_avg"]
+                     indoor_test_new[index,"datetime_round"] = indoor_test2[j-1,"datetime_round"] + i*60
+                     index = index + 1
+                }
+                
+        }
+}
+
+indoor_test3<-rbind(indoor_test2,indoor_test_new)
+indoor_test4<-indoor_test3[order(indoor_test3$datetime, decreasing = FALSE),]
+
+pdf(paste0(img_path,"indoor_exposure_min.pdf"),height = 6, width = 13)
+ggplot(indoor_test4,aes(x = datetime, y = ve_avg)) + geom_bar(stat="identity") +ylab("PM(ug)") + theme(axis.text.x= element_text( size = 16),axis.text.y= element_text( size = 16),text = element_text(size=18)) 
+dev.off()
+
+df_indoor_outdoor_fl_v2
+
+```
+
+Outdoor pollution kirging modeling
+```{r}
+
+#load("~/Individual_expsoure/df/pollutant_code9.RData")
+p=read.xlsx("t25_v2.xlsx", sheetName=1) #since in the Mysql there is no data available at 24th of March, We just manuly select them and save to the xlsx file
+p$date = "2017-03-24"
+pm25 = p[,c(2,3,4,5,6,7,8,9)]
+p=read.xlsx("t10_v2.xlsx", sheetName=1) 
+p$date = "2017-03-24"
+pm10 = p[,c(2,3,4,5,6,7,8,9)]
+t25_v1 = pm25
+t10_v1 =pm10
+
+p = read.xlsx(paste0(xlsx_path,"ozone.xlsx"))
+ozone_v1 = p
+
+
+#first calculate the distances and semivariance
+#coordinates(tt) = ~lat+lon
+# proj4string(tt) = CRS("+proj=utm +ellps=WGS84 +datum=WGS84")
+TIME = 1
+t <- t10_v1[t10_v1$hour==TIME,]
+min_x = min(t$lon) #minimun y coordinate
+min_y = min(t$lat) #minimun x coordinate
+x_length = max(t$lon - min_x)
+y_length = max(t$lat - min_y) #easting amplitude
+ #northing amplitude 
+cellsize = 0.001 #pixel size
+nrow = round(x_length/cellsize,0) #number of rows in grid
+ncol = round(y_length/cellsize,0) #number of columns in grid
+coordinates(t) = ~lat+lon
+proj4string(t) = CRS("+proj=utm +ellps=WGS84 +datum=WGS84")
+
+#proj4string(t) = CRS("+init=epsg:4326")#assign CRS with projected coordinates.
+grid = GridTopology(cellcentre.offset=c(min_y,min_x),cellsize=c(cellsize,cellsize),cells.dim=c(ncol,nrow))
+#Convert GridTopolgy object to SpatialPixelsDataFrame object.
+grid = SpatialPixelsDataFrame(grid,
+                              data=data.frame(id=1:prod(ncol,nrow)),
+                              proj4string=CRS(proj4string(t)))
+#plot(grid)
+gridded(grid)=TRUE
+
+ozone.vgm= variogram(value~ 1,t)#calculate sample or residual variogram: alpha is the direction 
+pdf(paste(img_path,"DATE_",DATE,"_TIME_", TIME,".pdf"))
+plot(ozone.vgm)
+dev.off()
+# 
+# png(paste(img_path,"DATE_",DATE,"_TIME_", TIME,".png"))
+# plot(ozone.vgm)
+# dev.off()
+#fitting models
+#ozone.vgm<-ozone.vgm[-1,]
+ozone_Gau_fit = fit.variogram(ozone.vgm, model = vgm(600,"Gau",0.1,0.01))
+#semivar_ml_vlues = variogramLine( vgm(700,"Gau",0.1,0.0001),0.1,10)
+# ozone_Exp_fit = fit.variogram(ozone.vgm, model = vgm(700,"Exp",0.01,0))
+# #semivar_ml_vlues = variogramLine( vgm(700,"Gau",0.1,0.0001),0.1,10)
+# ozone_Sph_fit = fit.variogram(ozone.vgm, model = vgm(700,"Sph",0.1,nugget = -100))
+
+#ave images 
+pdf(paste0(img_path,"Gau.pdf"))
+plot(ozone.vgm, model=ozone_Gau_fit,xlab=list(cex=2),ylab = list(cex= 2),main=list( cex=3))
+dev.off()
+#Choose gau as the fitting models
+ozone.krig = krige(value~1,t,grid,model = vgm(600,"Gau",0.1,0.01))
+
+plot(ozone.krig)
+
+
+
+
+
+##find the optimal combination of parameters
+ensrmse<-unikrigrmse <- sipkrigrmse <- ordkrigrmse <- idwrmse <- rep(NA, 5)
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+
+# vag parameters for ordinary kriging
+psill = c(1,10,100,250,500)
+range = c(0.1,0.5,1,10,20,50)
+model = c("Exp","Mat")
+nugget = c(0.001,0.01,0.1,1)
+beta = c(0.05,0.12,0.2,0.5)
+#### parameters for idw
+idp = c(0.3,0.5,0.8)
+nfolds = 3
+
+
+krig_fun_v2 <- function(t = t){
+
+        min_x = min(t$lon) #minimun y coordinate
+        min_y = min(t$lat) #minimun x coordinate
+        x_length = max(t$lon - min_x) #northing amplitude 
+        y_length = max(t$lat - min_y) #easting amplitude
+        
+        cellsize = 0.001 #pixel size
+        ncol = round(y_length/cellsize,0) #number of columns in grid
+        nrow = round(x_length/cellsize,0) #number of rows in grid
+        coordinates(t) = ~lat+lon
+        proj4string(t) = CRS("+proj=utm +ellps=WGS84 +datum=WGS84")
+        
+        #proj4string(t) = CRS("+init=epsg:4326")#assign CRS with projected coordinates.
+        grid = GridTopology(cellcentre.offset=c(min_y,min_x),cellsize=c(cellsize,cellsize),cells.dim=c(ncol,nrow))
+        #Convert GridTopolgy object to SpatialPixelsDataFrame object.
+        grid = SpatialPixelsDataFrame(grid,
+                                      data=data.frame(id=1:prod(ncol,nrow)),
+                                      proj4string=CRS(proj4string(t)))
+        
+        k <- kfold(t, nfolds)
+        m_cv = function(para,type_kriging = type_kriging){
+                rmse <- rep(NA,nfolds)
+                for (fold in 1:nfolds) {
+                        test <-  t[k==fold,]
+                        train <- t[k!=fold,]
+                        #use the optimal parameters for vgm
+                        if(type_kriging =="ordinary"){
+                                vgm_opt = vgm(psill = para[,"psill"],model = as.character(para[,"model"]), range = para[,"range"],nugget = para[,"nugget"])   
+                                m_ordinary <- gstat(formula=value~1,locations=train,model = vgm_opt) #ordinary kriging
+                                p_ordinary <- predict(m_ordinary, newdata=test, debug.level=0)$var1.pred
+                                rmse[fold]<-  RMSE(test$value, p_ordinary)
+                        }else if(type_kriging == "simple"){
+                                vgm_opt = vgm(psill = para[,"psill"],model = as.character(para[,"model"]), range = para[,"range"],nugget = para[,"nugget"])  
+                                m_simply <- gstat(formula=value~1,locations=train,model = vgm_opt,beta = para[,"beta"]) #simply kriging
+                                p_simply <- predict(m_simply,newdata=test, debug.level=0)$var1.pred
+                                rmse[fold]<-  RMSE(test$value, p_simply)
+                        }else if(type_kriging == "idw"){
+                                  if (idp < .001) return(Inf)
+                                  m_idw <- gstat(formula=value~1, locations=train, set=list(idp=para))
+                                  p_idw <- predict(m_idw, newdata=test, debug.level=0)$var1.pred
+                                  rmse[fold]<-  RMSE(test$value, p_idw)
+                                  
+                        }else{
+                                warning("There is no correct type of kriging. The types of Krigning include ordinary, simple and idw")
+                        }
+                 
+                }
+                mean(rmse)
+        }
+
+        opt_para_function <- function(type_kriging= "ordinary"){
+        #type_kriging= "ordinary"
+        
+        #function for each parameter combination
+        
+                ## find the optimal parameters
+                if(type_kriging == "ordinary"){
+                        paras = expand.grid(psill = psill,model = model,range= range,nugget = nugget)
+                        
+                }else if(type_kriging =="simple"){
+                        paras = expand.grid(psill = psill,model = model,range= range,nugget = nugget,beta = beta)
+                        
+                        
+                }else if(type_kriging == "idw"){
+                        paras = expand.grid(idp = idp)
+                }
+                
+                para_rmse <- rep(NA,nrow(paras))
+                for(i in 1:nrow(paras)){
+                        para = paras[i,]
+                        para_rmse[i] = m_cv(para,type_kriging = type_kriging)
+                }
+                
+                #the optimal paramets and rmse values
+                index_opt = which.min(para_rmse)
+                rmse_opt = para_rmse[index_opt]
+                para_opt = paras[index_opt,]
+                para_list <-list(para_opt,rmse_opt)
+                names(para_list) <-c("para_opt","rmse_opt")
+                para_list       
+        }
+                
+
+
+        types_kriging <- c("ordinary","simple","idw")
+        results_krigning <-vector("list",3)
+        names(results_krigning) <-types_kriging
+        for (j in 1:length(types_kriging)){
+                para_list = opt_para_function(types_kriging[j]) 
+                results_krigning[[j]] = para_list
+                 
+         }
+
+
+        #find out the best mode for the 
+        results= data.frame(type_kriging=character(),
+                          rmse=numeric(),
+                          stringsAsFactors=FALSE)
+        for (i in 1:length(results_krigning)){
+                name = names(results_krigning[i])
+                rmse = results_krigning[i][[1]][2]
+                results[i,] = c(name,rmse)
+        }
+        
+        opt_rmse = min(results$rmse)
+        opt_model_index = as.integer(which.min(results$rmse))
+        opt_model = as.character(results[opt_model_index,"type_kriging"])
+        para= as.data.frame(results_krigning[opt_model_index][[1]][[1]])
+
+
+        
+         if(opt_model =="ordinary"){
+                
+                vgm_opt = vgm(psill = para[,"psill"],model = as.character(para[,"model"]), range = para[,"range"],nugget = para[,"nugget"]) 
+                #vgm_opt = vgm(psill = 30,model ="Mat", range = 0.1,nugget =30) 
+                ozone.vgm= variogram(value~ 1,t)
+                
+                fit = fit.variogram(ozone.vgm, model = vgm_opt)
+                #plot(ozone.vgm, fit)
+                pol.krig<- krige(formula=value~1, t, grid,model = fit) #ordinary kriging
+ 
+        }else if(opt_model == "simple"){
+                vgm_opt = vgm(psill = para[,"psill"],model = as.character(para[,"model"]), range = para[,"range"],nugget = para[,"nugget"])   
+                ozone.vgm= variogram(value~ 1,t)
+                fit = fit.variogram(ozone.vgm, model = vgm_opt)
+                pol.krig<- krige(formula=value~1, t, grid,model = fit,beta =para[,"beta"])#simply kriging
+                #plot(pol.krig)
+                
+        }else if(opt_model== "idw"){
+                if (idp < .001) return(Inf)
+                 pol.krig <- idw(formula=value~1,  t, grid, idp = para)
+     
+                                  
+        }else{
+                warning("There is no correct type of kriging. The types of Krigning include ordinary, simple and idw")
+                        
+                
+        }
+
+        opts <-list(opt_model = opt_model,para =para, kriging_model = pol.krig,opt_rmse = opt_rmse)
+        opts
+
+
+}
+
+
+pollutant = "pm"
+
+
+for( TIME in c(0:23) ){
+        if(pollutant =="ozone")
+        {
+                t = ozone_v1[ozone_v1$hour==TIME,]
+
+        }
+        if(pollutant =="pm"){
+                t25 <- t25_v1[t25_v1$hour==TIME,]
+                t25 <- na.omit(t25)
+                t10 <- t10_v1[t10_v1$hour==TIME,]
+                t10_com = t10[t10$name%in%t25$name,]#find the same monitoring stations of PM2.5 and PM10
+                t10_uncom = t10[!t10$name%in%t25$name,] 
+                rt_10To25 = mean(t10_com$value / t25$value) #calculate the average ratio of PM2.5/PM10
+                t10_uncom_to25 = t10_uncom$value/rt_10To25 #using the ratio to calculate the pm2.5 for the unavailable monitoring stations
+                t10_uncom$value =t10_uncom_to25
+                t25_v2 = rbind(t25,t10_uncom) #t25_v2 should be the value for Kriging interpolation
+                t = t25_v2 
+        }
+        
+        datetime = t[1,"datetime"]
+        if(file.exists(paste0(df_path,pollutant,"Optimal_krig_Date_",DATE,"_Time_",TIME,".RData"))){
+                pol.krig = load(paste0(df_path,pollutant,"Optimal_krig_Date_",DATE,"_Time_",TIME,".RData"))
+        }else{
+                pol.krig= krig_fun_v2(t)
+                save(pol.krig,file=paste0(df_path,pollutant,"Optimal_krig_Date_",DATE,"_Time_",TIME,".RData"))
+                krig_model = pol.krig$kriging_model
+                # ozone.krig = krige(value~1,t,grid,model = ozone_Gau_fit) #use varigram model from Time 1
+                pol.krig.pred = krig_model["var1.pred"]
+                save(pol.krig.pred,file=paste0(df_path,pollutant,"_Predict_krig_Date_",DATE,"_Time_",TIME,".RData"))
+        }
+        
+       
+        pdf(paste0(img_path,pollutant,"_krig_Date_",DATE,"_Time_",TIME,".pdf"))
+        par(mar=c(3.5, 3.5, 4, 1), mgp=c(2.4, 0.8, 0))
+        plot(krig_model, main = list(paste(datetime),cex = 3))
+        dev.off()
+        png(paste0(img_path,pollutant,"_krig_Date_",DATE,"_Time_",TIME,".png"))
+        plot(krig_model, main = list(paste(datetime),cex = 3))
+        dev.off()
+        #rm(pol.krig)
+        #rm(pol.krig.pred)
+        #rm(krig_model)
+       
+        
+}
+
+opt_params = vector(mode= "numeric",length = 24)
+opt_models = vector(mode= "character",length = 24)
+
+for(TIME in 0:23){
+        load(paste0(df_path,pollutant,"Optimal_krig_Date_",DATE,"_Time_",TIME,".RData"))
+        opt_rmse = pol.krig$opt_rmse
+        opt_params[TIME+1] = as.numeric(opt_rmse)
+        
+}
+```
+
+
+
+
+Select data from Moving with the same Date as the ones in kriging.
+```{r}
+places <- read.csv(paste0(xlsx_path,"places_20170324.csv"))
+places$Start <- as.POSIXct( places$Start , format = "%Y-%m-%dT%H:%M:%S" , tz = "CET")
+places$End <- as.POSIXct( places$End , format = "%Y-%m-%dT%H:%M:%S" , tz = "CET")
+p_v1 = places[,c("Start","End","Latitude","Longitude")]
+p_v2 = p_v1
+
+for(i in 1:(nrow(p_v1)-1)){
+        Start = p_v1[i,]$End
+        End = p_v1[i+1,]$Start
+        if(!(Start == End))
+        {       
+                Latitude = (p_v1[i,]$Latitude + p_v1[i+1,]$Latitude)/2
+                Longitude = (p_v1[i,]$Longitude + p_v1[i+1,]$Longitude)/2
+                new = data.frame(Start,End,Latitude,Longitude) 
+                p_v2 = rbind(p_v2,new)
+        }
+        
+}
+p_v3 = p_v2[order(p_v2$Start, decreasing = FALSE),]
+p_v3$type = "outdoor"
+p_v3$sum_pm25 = 0
+df_outdoor = p_v3[,c("Start","End","Latitude","Longitude","type","sum_pm25")]
+
+
+
+
+#row_i is the row from df_outdoor that is needed to be interpolated by the row_j in activity data frame
+# 
+# df_activity <- data.frame(Start=as.POSIXct(character()),
+#                  End=as.POSIXct(character()),
+#                  Latitude=numeric(),
+#                  Longitude=numeric(),
+#                  type=character(),
+#                  activity=character(),
+#                  stringsAsFactors=FALSE)
+# df_activity = as.data.frame(df_activity)
+# 
+# j = 1
+# index = 1
+# df_outdoor_v1 = df_outdoor
+# i = 1
+# while (i < nrow(df_outdoor)){
+#                 index = 1
+#                 if(activity_v1$Start[j] >= df_outdoor$Start[i] & activity_v1$End[j] <=df_outdoor$End[i]){
+#                         if(activity_v1$Start[j] == df_outdoor$Start[i] & activity_v1$End[j] == df_outdoor$End[i]){
+#                                 df_outdoor[i,"activity"] = as.character(activity_v1[j,"activity"])
+#                                 i = i + 1
+#                                 j = j + 1
+# 
+#                         }else{
+#                         df_activity[index,"Start"]= df_outdoor$Start[i]
+#                         df_activity[index,"End"] = activity_v1$Start[j]
+#                         df_activity[index,"Latitude"] = df_outdoor$Latitude[i]
+#                         df_activity[index,"Longitude"] =df_outdoor$Longitude[i]
+#                         df_activity[index,"type"]=df_outdoor$type[i]
+#                         df_activity[index,"activity"] = as.character(activity_v1$activity[i])
+# 
+#                         index = index + 1
+#                         df_activity[index,"Start"]  = activity_v1[j,"Start"]
+#                         df_activity[index,"End"]  = activity_v1[j,"End"]
+#                         df_activity[index,"Latitude"]  = df_outdoor[i,"Latitude"]
+#                         df_activity[index,"Longitude"]  = df_outdoor[i,"Longitude"]
+#                         df_activity[index,"type"]  = "outdoor"
+#                         df_activity[index,"activity"]  = as.character(activity_v1[j,"activity"])
+# 
+# 
+#                         index = index +1
+#                         df_activity[index,"Start"] = activity_v1$End[j]
+#                         df_activity[index,"End"] = df_outdoor$End[i]
+#                         df_activity[index,"Latitude"] = df_outdoor$Latitude[i]
+#                         df_activity[index,"Longitude"] = df_outdoor$Longitude[i]
+#                         df_activity[index,"type"] = df_outdoor$type[i]
+#                         df_activity[index,"activity"] = "rest"
+# 
+# 
+#                         #replace the row in df_outdoor with the new rows from df_activity
+# 
+#                         df_outdoor = rbind(df_activity,df_outdoor[-i,])
+#                         df_outdoor = df_outdoor[order(df_outdoor$Start),]
+# 
+#                         i = i + 2
+#                         j = j +1
+#                 }
+# 
+#                 }else{
+#                         df_outdoor[i,"activity"]= "rest"
+#                         i = i + 1
+#                 }
+#         }
+
+df_outdoor_v2 = df_outdoor[!df_outdoor$Start == df_outdoor$End,] #Remove NA data where the start time is the same as end time
+
+
+#################################SUM the indoor pollution concentrations levels$##########################
+if(file.exists(paste0(df_path,"df_indoor.RData"))){
+       df_indoor =   load(paste0(df_path,"df_indoor.RData"))
+}else{
+        
+         load("~/Individual_expsoure/e_f_df.RData")
+        df_indoor <- data.frame(Start=as.POSIXct(character()),
+                         End=as.POSIXct(character()),
+                         sum_pm=numeric(),
+                         sum_co2=numeric(),
+                         sum_voc=numeric(),
+                         sum_allpollu=numeric(),
+                         type=character(),
+                         activity = character(),
+                         stringsAsFactors=FALSE)
+        
+        
+        i = 1
+        index = 1
+        df_outdoor_v3 = df_outdoor_v2
+        
+        
+        while(i < (nrow(e_f_df)-1))
+                {      
+                        
+                        sum_pm_indoor = e_f_df$pm[i]
+                        sum_co2_indoor = e_f_df$co2[i]
+                        sum_voc_indoor = e_f_df$voc[i]
+                        sum_pollut_indoor = e_f_df$allpollu[i]
+                        success = TRUE
+                        start = e_f_df$datetime[i]
+                        j = i+1
+                        while ((j <= (nrow(e_f_df)-1)) &success){
+                                time =as.numeric(e_f_df$datetime[j]-e_f_df$datetime[j-1])
+                                sum_pm_indoor = sum_pm_indoor + (e_f_df$pm[j] + e_f_df$pm[j-1])*time/2  #unit is ug/m3 * min
+                                sum_co2_indoor = sum_co2_indoor + (e_f_df$co2[j]+e_f_df$co2[j-1])*time/2 
+                                sum_voc_indoor = sum_voc_indoor + (e_f_df$voc[j]+e_f_df$voc[j-1])*time/2 
+                                sum_pollut_indoor = sum_pollut_indoor + (e_f_df$allpollu[j]+e_f_df$allpollu[j-1])*time/2 
+                                -1
+                                success =!(as.numeric(e_f_df$datetime[j+1]-e_f_df$datetime[j]) > 10)#check if the time difference is longer than 10mins or not. If longer than 10 then see it as outdoor 
+                                j = j +1
+                                
+                        }
+                        
+                       df_indoor[index,"Start"] = start
+                       df_indoor[index,"End"] = e_f_df$datetime[j-1]
+                       df_indoor[index,"sum_pm"] = sum_pm_indoor
+                       df_indoor[index,"sum_co2"] = sum_co2_indoor 
+                       df_indoor[index,"sum_voc"] = sum_voc_indoor
+                       df_indoor[index,"sum_allpollu"] = sum_pollut_indoor
+                       df_indoor[index,"type"] ="indoor"
+                        i = j 
+                        index = index +1
+        } 
+        
+        
+        write.xlsx(df_indoor, "df_indoor.xlsx")
+        save(df_indoor,file=paste0(df_path,"df_indoor.RData"))
+}
+
+
+
+df_indoor_v1 = df_indoor
+df_indoor$type = as.character(df_indoor$type)
+df_indoor_v1$activity ="rest"
+
+for(i in 1:(nrow(df_indoor_v1)-1))
+{
+        index = nrow(df_indoor_v1)+1
+        if(df_indoor_v1$End[i] == df_indoor_v1$Start[i+1]){
+
+        }else{
+                df_indoor_v1[index,"Start"] = df_indoor_v1[i,"End"]
+                df_indoor_v1[index,"End"] = df_indoor_v1[i+1,"Start"]
+                df_indoor_v1[index,"sum_pm"] = 0
+                df_indoor_v1[index,"sum_co2"] = 0
+                df_indoor_v1[index,"sum_voc"] = 0
+                df_indoor_v1[index,"sum_allpollu"] = 0
+                df_indoor_v1[index,"type"] = "outdoor"
+                df_indoor_v1[index,"activity"] ="walking"
+        }
+
+}
+df_indoor_v1[df_indoor_v1$type=="outdoor","activity"] = "walking"
+
+df_indoor_v2 = df_indoor_v1[order((df_indoor_v1$Start)),]
+df_indoor_v2$Latitude = 0
+df_indoor_v2$Longitude = 0
+
+#### merge indoor and outdoor data 
+#df_indoor_v2 = df_indoor
+df_indoor_outdoor <- data.frame(Start=as.POSIXct(character()),
+                 End=as.POSIXct(character()),
+                 Latitude = numeric(),
+                 Longitude = numeric(),
+                 type=character(),
+                 stringsAsFactors=FALSE)
+
+index_v1 = 1
+j = 1
+for (i in (1:(nrow(df_outdoor)-1))){
+        t1_s = df_outdoor$Start[i]
+        t1_e = df_outdoor$End[i]
+        while(j <=(nrow(df_indoor_v2))){
+                t2_s = df_indoor_v2$Start[j]
+                t2_e = df_indoor_v2$End[j]
+                if(t2_s >= t1_s & t2_e < t1_e) # if the start time between the start time and end time of outdoor
+                         {
+                            #insert indoor to new  data frame
+                             df_indoor_outdoor[index_v1,"Start"] = df_indoor_v2$Start[j]
+                             df_indoor_outdoor[index_v1,"End"] = df_indoor_v2$End[j]
+                             df_indoor_outdoor[index_v1,"type"] =  df_indoor_v2$type[j]
+                             df_indoor_outdoor[index_v1,"Longitude"] = df_outdoor$Longitude[i]
+                             df_indoor_outdoor[index_v1,"Latitude"] = df_outdoor$Latitude[i]
+                             
+                             index_v1 = index_v1 +1
+                             j = j + 1
+                            
+                        }
+                else{
+                        #insert outdoor to new data frame
+                        df_indoor_outdoor[index_v1,"Start"] = df_outdoor$Start[i]
+                        df_indoor_outdoor[index_v1,"End"] = df_outdoor$End[i]
+                        df_indoor_outdoor[index_v1,"type"] =  df_outdoor$type[i]
+                        df_indoor_outdoor[index_v1,"Latitude"] = df_outdoor$Latitude[i]
+                        df_indoor_outdoor[index_v1,"Longitude"] =  df_outdoor$Longitude[i]
+                       
+                        index_v1 = index_v1 + 1
+                        break
+                        }
+             
+                
+        }
+        if(j > nrow(df_indoor_v2)){
+                        df_indoor_outdoor[index_v1,"Start"] = df_outdoor$Start[i+1]
+                        df_indoor_outdoor[index_v1,"End"] = df_outdoor$End[i+1]
+                        df_indoor_outdoor[index_v1,"type"] =  df_outdoor$type[i+1]
+                        df_indoor_outdoor[index_v1,"Latitude"] = df_outdoor$Latitude[i+1]
+                        df_indoor_outdoor[index_v1,"Longitude"] =  df_outdoor$Longitude[i+1]
+                        
+                        index_v1 = index_v1 + 1
+        }
+        
+        
+}
+
+ 
+df_indoor_outdoor_v2 = merge(df_indoor_outdoor,df_indoor,by=c("Start","End"),all.x= TRUE)
+#Now replace NA with accumulation concentration values of corresponding pollutants, take PM as example
+df_indoor_outdoor_v3 = df_indoor_outdoor_v2[df_indoor_outdoor_v2$type.x =="outdoor",c("Start","End","Latitude","Longitude","sum_pm")] 
+
+p_v4 = df_indoor_outdoor_v3
+
+get_kriging_time = function(TIME,DATE){
+        file=paste0(df_path,"Predict_krig_Date_",DATE,"_Time_",TIME,".RData")
+        load(file)
+        krig_location = data.frame(pol.krig.pred)
+        krig_location
+}
+
+DATE = "2017-03-24"
+TIME = 11
+
+
+ceil(Start, units='hours')#returns next ceiling of the date at the miniutes
+for(i in 1:(nrow(p_v4))){
+        Start_round = round.POSIXt(p_v4$Start[i], digits = c("hours"))
+        End_round = round.POSIXt(p_v4$End[i], digits = c("hours"))
+        Start_hour =  format(Start_round, format='%H')
+        End_hour =  format(End_round, format='%H')
+        p_v4$Start_round[i] = as.integer(Start_hour)
+        p_v4$End_round[i] = as.integer(End_hour)
+}
+
+
+krig_location = get_kriging_time(TIME,DATE)
+p_v5 = p_v4
+
+date = "2017-03-24"
+p_v5[,"Latitude"] = round(p_v5[,"Latitude"],digits =3)
+p_v5[,"Longitude"] = round(p_v5[,"Longitude"],digits =3)
+p_v5[p_v5$End_round ==0,"End_round"] =23 ##Wh
+for(i in 1:nrow(p_v5))
+        {
+        Start_round = p_v5$Start_round[i]
+        End_round = p_v5$End_round[i]
+        if(Start_round == End_round){
+                krig_location = get_kriging_time(Start_round,date) #kriging prediction at time Start_round
+                
+                round((krig_location[,"s2"]),digits =3)->krig_location[,"s2"]
+                round((krig_location[,"s1"]),digits =3)->krig_location[,"s1"]
+                #select the kriging prediction values in the location that the individual is located at time Start_round
+                krig_pred = krig_location[krig_location[,"s1"]==p_v5[i,"Latitude"]&krig_location[,"s2"]==p_v5[i,"Longitude"],"var1.pred"]
+                #the difference between start and end time points
+                timeDiff = as.numeric(p_v5$End[i] - p_v5$Start[i]) # time difference in mins
+                p_v5[i,"sum_pm"] = krig_pred*timeDiff 
+         
+        }else{
+                #if the time differences more than one hour
+                mid_start_time = as.POSIXct(paste0(date," ",Start_round,":30:00"))
+                mid_end_time = as.POSIXct(paste0(date," ",End_round-1,":30:00"))
+                diff_start = difftime(mid_start_time,p_v5$Start[i], units="mins")
+                diff_end = difftime(p_v5$End[i], mid_end_time,units="mins")
+                
+                krig_location_start = get_kriging_time(Start_round,date)#get the kriging prediction values at time "Start_round"
+                krig_location_end = get_kriging_time(End_round,date)#get the kriging prediction values at time "Start_round"
+                round((krig_location_start[,"s2"]),digits =3)->krig_location_start[,"s2"]
+                round((krig_location_start[,"s1"]),digits =3)->krig_location_start[,"s1"]
+                round((krig_location_end[,"s2"]),digits =3)->krig_location_end[,"s2"]
+                round((krig_location_end[,"s1"]),digits =3)->krig_location_end[,"s1"]
+                
+                krig_pred_start = krig_location_start[krig_location_start[,"s1"]==p_v5[i,"Latitude"]&krig_location_start[,"s2"]==p_v5[i,"Longitude"],"var1.pred"]
+                krig_pred_end = krig_location_end[krig_location_end[,"s1"]==p_v5[i,"Latitude"]&krig_location_end[,"s2"]==p_v5[i,"Longitude"],"var1.pred"]
+                
+                
+                if(End_round - Start_round == 1){
+                       p_v5[i,"sum_pm"] = krig_pred_start*as.numeric(diff_start) +krig_pred_end * as.numeric(diff_end)
+                }else{
+                        pm_tm =  krig_pred_start*as.numeric(diff_start) +krig_pred_end * as.numeric(diff_end)
+                        for (tm in ((Start_round)+1):(End_round-1)){
+                                krig_location_tm = get_kriging_time(tm,date)
+                                round((krig_location_tm[,"s2"]),digits =3)->krig_location_tm[,"s2"]
+                                round((krig_location_tm[,"s1"]),digits =3)->krig_location_tm[,"s1"]
+                                krig_pred_tm = krig_location_tm[krig_location_tm[,"s1"]==p_v5[i,"Latitude"]&krig_location_tm[,"s2"]==p_v5[i,"Longitude"],"var1.pred"]
+                                try(if(is.na(krig_pred_tm)) stop(paste("The kriging value is emply at Time",tm )))
+                                pm_tm = pm_tm + krig_pred_tm*60 # 60 is the mins
+                                
+                        }
+                        p_v5[i,"sum_pm"] = pm_tm
+                        
+                }
+        }
+        
+}
+p_v5
+
+
+```
+
+```{r}
+
+df_indoor_outdoor_v4 = df_indoor_outdoor_v2[df_indoor_outdoor_v2$type.x =="indoor",c("Start","End","Latitude","Longitude","sum_pm","type.x")]  ##get out the indoor accumulation data
+p_v5$type.x = "outdoor"
+df_indoor_outdoor_v5 = p_v5[,c("Start","End","Latitude","Longitude","sum_pm","type.x")]
+df_indoor_outdoor_fl = rbind(df_indoor_outdoor_v4,df_indoor_outdoor_v5)
+df_indoor_outdoor_fl= df_indoor_outdoor_fl[order((df_indoor_outdoor_fl$Start)),]
+barplot(df_indoor_outdoor_fl$sum_pm)
+
+sum_indoor = sum(df_indoor_outdoor_fl[df_indoor_outdoor_fl$type.x =="indoor","sum_pm"])
+sum_outdoor = sum(df_indoor_outdoor_fl[df_indoor_outdoor_fl$type.x =="outdoor","sum_pm"])
+df_indoor_outdoor_fl = data.frame(df_indoor_outdoor_fl)
+write.csv(df_indoor_outdoor_fl,file=paste0(xlsx_path,"df_indoor_outdoor_fl.csv"))
+
+barplot(c(sum_indoor,sum_outdoor))
+``` 
+
+
+Integrate activities to df_indoor_outdoor_fl
+```{r}
+
+########################### added the activity type on df_outdoor####################
+activity = read.csv(paste0(xlsx_path,"activities_20170324.csv"),1) 
+activity$type = "outdoor"
+activity = activity[,c("Start","End","type","Activity")]
+colnames(activity) = c("Start","End","type","activity")
+DATE = "2017-03-24"
+activity$Start <- as.POSIXct(activity$Start , format = "%Y-%m-%dT%H:%M:%S" , tz = "CET")
+activity$End<- as.POSIXct(activity$End , format = "%Y-%m-%dT%H:%M:%S" , tz = "CET")
+
+
+activity_new <- data.frame(Start=as.POSIXct(character()),
+                 End=as.POSIXct(character()),
+                 type=character(),
+                 activity=character(),
+                 stringsAsFactors=FALSE)
+
+start = as.POSIXct(paste0(DATE,"T00:00:00"), format = "%Y-%m-%dT%H:%M:%S" , tz = "CET")
+end = as.POSIXct(paste0(DATE,"T00:00:00"), format = "%Y-%m-%dT%H:%M:%S" , tz = "CET") +24*60*60
+ 
+if( activity$Start[1] != start){
+        activity_new[1,"Start"] = start
+        activity_new[1,"End"] =activity[1,"Start"]
+        activity_new[1,"type"] = "outdoor"
+        activity_new[1,"activity"] = "rest"
+        activity = rbind(activity,activity_new)
+        activity = activity[order(activity$Start),]
+}
+
+ if( activity$End[nrow(activity)] != end){
+        activity_new[1,"End"] = end
+        activity_new[1,"Start"] =activity[nrow(activity),"End"]
+        activity_new[1,"type"] = "outdoor"
+        activity_new[1,"activity"] = "rest"
+        activity = rbind(activity,activity_new)
+        activity = activity[order(activity$Start),]
+ }
+ 
+ 
+for(i in 1:(nrow(activity)-1)){
+        if(!activity$End[i]==activity$Start[i+1]){
+                activity_new[1,"Start"] = activity$End[i]
+                activity_new[1,"End"] = activity$Start[i+1]
+                activity_new[1,"type"] = activity$type[i]
+                activity_new[1,"activity"] = "rest"
+                activity = rbind(activity,activity_new)
+        }
+}
+ activity = activity[order(activity$Start),]
+
+
+
+activity = data.frame(activity)
+activity_v1 =activity
+activity_v1$period = as.numeric(activity_v1$End - activity_v1$Start)
+df_indoor_outdoor_fl_v2 <- df_indoor_outdoor_fl
+for(i in (1:nrow(df_indoor_outdoor_fl_v2))){
+        
+        tst = df_indoor_outdoor_fl_v2[i,"Start"]
+        ted = df_indoor_outdoor_fl_v2[i,"End"]
+        
+        ##find the activity type between each period in df_indoor_outdor_fl
+        activity_start_df = activity_v1[activity_v1[,"Start"]<=tst,]
+        activity_start = activity_start_df[nrow(activity_start_df),"Start"]
+        activity_end_df = activity_v1[activity_v1[,"End"] >= ted,] 
+        activity_end = activity_end_df[1,"End"]
+        
+        
+        a = activity_v1[activity_v1[,"Start"] >= activity_start&activity_v1[,"End"]<=activity_end,]
+        act = as.character(a[a$period == max(a$period),"activity"])
+        df_indoor_outdoor_fl_v2[i,"activity"] = act
+}
+
+#@df_indoor_outdor_fl_v2 is the ones integrated with types of activities
+for(i in 1:nrow(df_indoor_outdoor_fl_v2)){
+        for (j in 1:nrow(df_indoor_v1)){
+                if(df_indoor_outdoor_fl_v2[i,"Start"]==df_indoor_v1[j,"Start"]&df_indoor_outdoor_fl_v2[i,"End"]==df_indoor_v1[j,"End"]){
+                        df_indoor_outdoor_fl_v2[i,"activity"] = df_indoor_v1[j,"activity"]
+                }
+        }
+}
+
+
+
+
+```
+
+
+
+
+```{r}
+VE_rest = 0.00893
+VE_transport =0.00893 
+VE_walk = 0.01326
+VE_run = 0.02924
+VE_cycle = 0.01861
+for (i in 1:nrow(df_indoor_outdoor_fl_v2)){
+        if(df_indoor_outdoor_fl_v2$activity[i] == "rest"){
+                df_indoor_outdoor_fl_v2$VE[i] = VE_rest
+        }else if(df_indoor_outdoor_fl_v2$activity[i] =="walking")
+        {
+                df_indoor_outdoor_fl_v2$VE[i] = VE_walk
+        }else if(df_indoor_outdoor_fl_v2$activity[i] =="transport"){
+                df_indoor_outdoor_fl_v2$VE[i] = VE_transport
+        }else if(df_indoor_outdoor_fl_v2$activity[i] =="cycle"){
+                df_indoor_outdoor_fl_v2$VE[i] = VE_cycle
+        }else if(df_indoor_outdoor_fl_v2$activity[i] =="run"){
+                df_indoor_outdoor_fl_v2$VE[i] = VE_run
+        }
+}
+
+df_indoor_outdoor_fl_v2$pm_ve = df_indoor_outdoor_fl_v2$sum_pm * df_indoor_outdoor_fl_v2$VE
+save(df_indoor_outdoor_fl_v2,file=paste0(df_path,"df_indoor_outdoor_fl_v2.RData"))
+write.xlsx(df_indoor_outdoor_fl_v2,file = paste0(xlsx_path,"df_indoor_outdoor_fl_v2.xlsx"))
+sum_pm_ve = c()
+for (i_act in levels(as.factor(df_indoor_outdoor_fl_v2$activity))){
+        pm_ve = sum(df_indoor_outdoor_fl_v2[df_indoor_outdoor_fl_v2$activity==i_act,"pm_ve"])
+        sum_pm_ve = c(sum_pm_ve,pm_ve)
+}
+
+
+as.character(levels(as.factor(df_indoor_outdoor_fl_v2$activity)))
+
+
+df_indoor_outdoor_fl_v2$time_diff = as.numeric(df_indoor_outdoor_fl_v2$End - df_indoor_outdoor_fl_v2$Start)
+df_indoor_outdoor_fl_v2$time_percentage = df_indoor_outdoor_fl_v2$time_diff /sum(df_indoor_outdoor_fl_v2$time_diff)
+
+sum_pm_time = c()
+for (i_act in levels(as.factor(df_indoor_outdoor_fl_v2$activity))){
+        pm_time = sum(df_indoor_outdoor_fl_v2[df_indoor_outdoor_fl_v2$activity==i_act,"time_percentage"])
+        sum_pm_time = c(sum_pm_time,pm_time)
+}
+
+
+types_activity = as.character(levels(as.factor(df_indoor_outdoor_fl_v2$activity)))
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+sum_pm_time_per = percent(sum_pm_time)
+
+types_activity = paste(types_activity,sum_pm_time_per)
+pdf(paste(img_path,"sum_pm_ve",".pdf"),height = 8,width = 10)
+barplot(sum_pm_ve,names.arg = types_activity,ylab="PM(ug)", las = 1,cex.axis = 1.5,cex.names=1.5)
+dev.off()
+```
+
+Using leaflet package to map the krging valuation on maps
+```{r}
+p  = df_indoor_outdoor_fl_v2
+lng = p[,"Longitude"]
+lat = p[, "Latitude"]
+#calculate the sum of VE and time difference based on the samem latitutide and Longitue
+ap  =aggregate(p[,c("sum_pm","VE","pm_ve","time_diff")], by=list(p$Latitude,p$Longitude), "sum")
+colnames(ap)[1:2] = c("Latitude","Longitude")
+pp = p[,c("Latitude","Longitude","type.x","activity")]
+pp_v1 = pp[!duplicated(pp),]
+p_type_activity = merge(ap,pp_v1,by="Latitude")
+colnames(p_type_activity)[2]<-"Longitude"
+p_type_activity$sum_pm = format(round(p_type_activity$sum_pm, 2), nsmall = 2)
+p_type_activity$time_diff = format(round(p_type_activity$time_diff, 2), nsmall = 2)
+p_type_activity$pm_ve = format(round(p_type_activity$pm_ve, 2), nsmall = 2)
+
+Longitude = p_type_activity$Longitude
+Latitude = p_type_activity$Latitude
+m <- leaflet(p_type_activity) %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addAwesomeMarkers(lng=Longitude, lat=Latitude, icon = icons,label = ~as.character(paste(type.x,",",activity,",Time:",time_diff,",PM:",pm_ve)),labelOptions = labelOptions(noHide = T,style = list(
+        "color" = "black",
+        "font-family" = "serif",
+        "font-style" = "italic",
+        "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+        "font-size" = "15px",
+        "border-color" = "rgba(0,0,0,0.5)"
+      ))) %>% 
+  addPolygons(lng = ~Longitude, lat = ~Latitude,
+    fill = F, weight = 2, color = "#FFFFCC", group = "Outline") %>%
+fitBounds(min(lng),  min(lat) ,max(lng) , max(lat))
+m  # Print the map
+
+
+r <- raster(system.file("external/test.grd", package="raster"))
+r = raster(nrow = 1000,ncol = 1000,xmn = 40.38333, xmx = 40.5, ymn = -3.733333, ymx= -3.56666)
+#r2 = projectRaster(r, crs='+proj=latlong +datum=WGS84')
+#coordinates(t) = ~x+y
+
+t10_com = t10[t10$name%in%t25$name,]#find the same monitoring stations of PM2.5 and PM10
+t10_uncom = t10[!t10$name%in%t25$name,] 
+
+t10_uncom  = aggregate( value ~ lat + lon, t10_uncom , mean)
+t25 = aggregate( value ~ lat + lon, t25, mean)
+t10 = aggregate( value ~ lat + lon, t10_com, mean)
+
+t10$value
+rt_10To25 = mean(t10$value / t25$value)
+t10_uncom_to25 = t10_uncom$value/rt_10To25
+t10_uncom$value =t10_uncom_to25
+t25_v2 = rbind(t25,t10_uncom) #t25_v2 should be the value for Kriging interpolation for the daily average
+t = t25_v2
+min_x = min(t$lon) #minimun y coordinate
+min_y = min(t$lat) #minimun x coordinate
+
+y_length = max(t$lat - min_y) #easting amplitude
+x_length = max(t$lon - min_x) #northing amplitude 
+cellsize = 0.001 #pixel size
+ncol = round(y_length/cellsize,0) #number of columns in grid
+nrow = round(x_length/cellsize,0) #number of rows in grid
+coordinates(t) = ~lat+lon
+proj4string(t) = CRS("+proj=utm +ellps=WGS84 +datum=WGS84")
+
+#proj4string(t) = CRS("+init=epsg:4326")#assign CRS with projected coordinates.
+grid = GridTopology(cellcentre.offset=c(min_x,min_y),cellsize=c(cellsize,cellsize),cells.dim=c(ncol,nrow))
+#Convert GridTopolgy object to SpatialPixelsDataFrame object.
+grid = SpatialPixelsDataFrame(grid,
+                              data=data.frame(id=1:prod(ncol,nrow)),
+                              proj4string=CRS(proj4string(t)))
+
+
+m <- fit.variogram(ozone.vgm, model = vgm(600,"Gau",0.1,0.01)) 
+g <- gstat(NULL, "PM", value~1, t, model = m)
+
+projection(r) <- projection(t)
+x <- interpolate(r, g)
+
+crs(x) <-CRS("+init=epsg:4326")
+extent(x) <- extent(-3.733333, -3.56666 , 40.38333, 40.5)
+pal <- colorNumeric(c("#0C2C84", "#41B6C4", "#FFFFCC"),  values(x),
+na.color = "transparent",reverse =TRUE)
+
+p_type_activity$time_percentage = as.numeric(p_type_activity$sum_pm) / sum(as.numeric(p_type_activity$sum_pm))
+
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+p_type_activity$time_percentage = percent(p_type_activity$time_percentage)
+
+p_type_activity_v2 = p_type_activity[-2,]
+
+outline <- p[chull(p$Longitude, p$Latitude),]
+
+getColor <- function(p) {
+  sapply(p$type.x, function(type.x) {
+  if(type.x == "indoor") {
+    "green"
+  } else if(type.x == "outdoor"){
+    "orange"
+  } })
+}
+
+icons_v2 <- awesomeIcons(
+  icon = 'ios-close',
+  library = 'ion',
+  markerColor = as.character(getColor(p_type_activity_v2))
+)
+
+Longitude = p_type_activity_v2$Longitude
+Latitude = p_type_activity_v2$Latitude
+
+ l<- leaflet(p_type_activity_v2) %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addAwesomeMarkers(lng=Longitude, lat=Latitude, icon = icons_v2,label = ~as.character(paste0(type.x,",",activity,", Time:",time_percentage,", PM:",pm_ve)),labelOptions = labelOptions(noHide = T,style = list(
+        "color" = "black",
+        "font-family" = "serif",
+        "font-style" = "italic",
+        "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+        "font-size" = "15px",
+        "border-color" = "rgba(0,0,0,0.5)"
+      ))) %>% 
+  addPolygons(lng = ~Longitude, lat = ~Latitude,
+    fill = F, weight = 2, color = "#FFFFCC", group = "Outline") %>%
+fitBounds(min(lng),  min(lat) ,max(lng) , max(lat))%>%
+  addRasterImage(x, colors = pal,project =TRUE,opacity = 0.7)%>%
+  addLegend(pal = pal, values = values(x),title = "Background PM2.5")
+ l
+
+
+```
+
+
+
+```{r}
+p = df_indoor_outdoor_fl_v2
+#aggrate by environment
+agg_environment =aggregate(p[,c("pm_ve")], by=list(p$type.x), "sum")
+#aggreate by activity
+agg_activity =aggregate(p[,c("pm_ve")], by=list(p$activity), "sum")
+agg_activity_pc = agg_activity$x / sum(agg_activity$x)
+```
+
+
+
+Validation 2017-03-31 and 2017-04-05
+```{r}
+
+#import atmobute data
+atmo = read.csv(paste0(xlsx_path,"Atmotube_2017-04-06-21-48-26.csv"))
+DATE_VAL = "2017-03-31"
+#DATE_VAL = "2017-04-05"
+#@para: pollutant : VOC, AQS
+e_f_merge = function(DATE_VAL,pollutant){
+        
+        start_time = paste(sub("'","", DATE_VAL),"00:00:00") 
+        start_time = paste0("'",start_time,"'")
+        end_time = paste(sub("'","", DATE_VAL),"23:59:59") 
+        end_time = paste0("'",end_time,"'")
+        
+        #pm is PM2.5
+        #Get the footbot data
+        
+        if(file.exists(paste0(df_path,"from_",start_time,"_to",end_time,".RData"))){
+                load(paste0(df_path,"from_",start_time,"_to",end_time,".RData"))
+        }else{
+                sql_footbot_cb <- paste("select time as datetime, pm, co2, voc, allpollu from foobot_samples where time between ",start_time, "  and ", end_time)
+                f_cb<-dbGetQuery(con,sql_footbot_cb)
+                f_cb$datetime = as.POSIXct(strptime(f_cb$datetime,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+                save(f_cb,file = paste0(df_path,"from_",start_time,"_to",end_time,".RData"))
+        }
+                
+        if(nrow(f_cb)== 0L){
+                stop("There is no footbot record in the target period.")
+                }
+
+        
+        if(file.exists(paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))){
+                load(paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))
+        }else{
+                sql_ebeacon_cb <- paste("select timestamp as datetime from phone_beacon where timestamp between",start_time, "  and", end_time)
+                e_cb<-dbGetQuery(con,sql_ebeacon_cb)
+                e_cb$datetime = as.POSIXct(strptime(e_cb$datetime,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+                save(e_cb,file = paste0(df_path,"ebeacon_phone_from_",start_time,"_to",end_time,".RData"))
+        }
+        
+        
+        if(nrow(e_cb)==0L){
+                stop("There is no ebeacon record in the target period.")
+        }
+        
+       
+        
+        #merge ebeacon and footbot data 
+        e_dt_cb = setDT(data.frame(e_cb))
+        f_dt_cb = setDT(data.frame(f_cb))
+        setkey(f_dt_cb, datetime)[, dateMatch:=datetime]
+        e_f_df_cb = f_dt_cb[e_dt_cb, roll='nearest',on = c("datetime"="datetime")]#e_f_df is the data table that is merged from footbot and ebeacon for a specific data
+        save(e_f_df_cb,file="e_f_df_cb.RData")
+
+
+        #get the data in the target period
+        if(file.exists(paste0(df_path,"ATMO_DATE_",DATE_VAL,".RData"))){
+                load(paste0(df_path,"ATMO_DATE_",DATE_VAL,".RData"))
+        }else{
+                start_cb = as.POSIXct(strptime(start_time,format = "'%Y-%m-%d %H:%M:%S'", tz = "CET"))
+                end_cb = as.POSIXct(strptime(end_time,format = "'%Y-%m-%d %H:%M:%S'", tz = "CET"))
+                atmo$Timestamp = as.POSIXct(strptime(atmo$Timestamp,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+                atmo_cb = atmo[atmo$Timestamp>start_cb & atmo$Timestamp<end_cb,]
+                save(atmo_cb,file= paste0(df_path,"ATMO_DATE_",DATE_VAL,".RData"))
+        }
+        
+
+        colnames(atmo_cb)[1] = "datetime"
+        if(nrow(atmo_cb)==0L){
+                stop("There is no Atmotube record in the target period.")
+        }
+        
+        atmo_dt_cb = setDT(data.frame(atmo_cb))
+        setkey(atmo_dt_cb, datetime)[, dateMatch:=datetime]
+        e_atmo_df_cb = atmo_dt_cb[e_dt_cb, roll='nearest',on = c("datetime"="datetime")] ##merge data ebeacon with ATMOtube data
+        
+        e_f_df_cb = data.frame(e_f_df_cb)
+        e_atmo_df_cb = data.frame(e_atmo_df_cb)
+        
+        if(pollutant == "VOC"){
+
+         pol_cb = cbind(e_f_df_cb[,c("datetime","voc")],e_atmo_df_cb[,"VOC"])
+         colnames(pol_cb) = c("datetime","VOC_Footbot","VOC_ATMOtube")
+         pol_cb$VOC_ATMOtube  = pol_cb$VOC_ATMOtube * 1000 # change ppm to ppb  1 ppm = 1000ppb
+        }else if(pollutant == "AQS"){
+                pol_cb = cbind(e_f_df_cb[,c("datetime","allpollu")],e_atmo_df_cb[,"AQS"])
+                colnames(pol_cb) = c("datetime","AQS_Footbot","AQS_ATMOtube")
+
+                pol_cb$AQS_ATMOtube  = 100- pol_cb$AQS_ATMOtube 
+        }
+        
+         pol_cb_rp= reshape(as.data.frame(pol_cb),varying=c(2:3),v.names="values",timevar="type",times=colnames(pol_cb[,c(2:3)]),direction="long") 
+        
+        
+        
+        
+        ggplot(data=pol_cb_rp,aes(x=datetime,y=values,group=type,colour=type,shape=type))+
+                geom_point(size=1)+geom_point(size=3)+xlab("Time") +
+                ylab("Value(ppm)")+ggtitle(DATE_VAL) ->pol_plot
+        
+        pol_plot <- pol_plot + theme(
+                panel.background = element_rect(fill = "transparent"), # or theme_blank()
+                panel.grid.minor = element_blank(), 
+                panel.grid.major = element_blank(),
+                plot.background = element_rect(fill = "transparent"),
+                axis.line=element_line(colour="black")
+                
+        )
+        pol_plot<-pol_plot+theme(legend.title = element_text(colour="black", size=16, face="bold"))
+        pol_plot<-pol_plot+theme(legend.text = element_text(colour="black", size = 16, face = "bold"))
+        # 
+        pol_plot<-pol_plot+theme(axis.text.x=element_text(colour="black",size=15),axis.text.y=element_text(colour="black",size=13))
+        # 
+        pol_plot<-pol_plot+theme(axis.title.x=element_text(colour="black",size=17),axis.title.y=element_text(colour="black",size=17))
+        pdf(paste0(img_path,"validation_pollutant_",pollutant,"_date_",DATE_VAL,".pdf"),height = 8, width = 10)
+        pol_plot
+        dev.off()
+        pol_plot
+        
+        }
+
+e_f_merge(DATE_VAL,"AQS")
+```
+
+
+```{r}
+atmo$Timestamp = as.POSIXct(strptime(atmo$Timestamp,format = "%Y-%m-%d %H:%M:%S", tz = "CET"))
+atmo[c(1758:2292),]
+```
+
+
+
+
+
+Calibration for the outdoor pollution(2017-04-05)
+```{r}
+load("~/Individual_expsoure/df/ATMO_DATE_2017-04-05.RData")
+atmo_cb
+#pick out the period when I was walking 
+moves_out_val = read.csv("activities_20170405.csv")
+moves_walking = moves_out_val[moves_out_val$Activity=="walking",]
+atmo_walking = data.frame(Timestamp=as.POSIXct(character()),
+                  VOC=numeric(),
+                  AQS=numeric(),
+                  Temperature=numeric(),
+                  Humidity=numeric(),
+                  Latitude=numeric(),
+                  Longitude=numeric(),
+                  stringsAsFactors=FALSE)
+index = 1
+for(i in 1:nrow(moves_walking)){
+        start_walking = as.character(moves_walking$Start[i])
+        start_walking = as.POSIXct(strptime(start_walking,format = "%Y-%m-%dT%H:%M:%S", tz = "CET"))
+        
+        end_walking = moves_walking$End[i]
+        end_walking = as.POSIXct(strptime(end_walking,format = "%Y-%m-%dT%H:%M:%S", tz = "CET"))
+        
+        while(j <= nrow(atmo_cb)){
+                atmo_time = atmo_cb$Timestamp[j]
+                if(atmo_time >= start_walking&atmo_time < end_walking){
+                        atmo_walking[index,] = atmo_cb[j,]
+                        index = index + 1
+                        
+                }
+                j = j + 1 
+        }
+}
+
+```
+Alternative routes analysis
+```{r}
+tsp = df_indoor_outdoor_fl_v2[df_indoor_outdoor_fl_v2$activity=="transport",][1,]
+```
+
+
+```{r}
+start_lat = 40.45713
+start_lon= -3.7118128
+end_lat = 40.439992
+end_lon= -3.6893769
+start_location = "Place in Estacion de Ciudad Universitaria, Madrid"
+end_location = "Place in El Viso, Madrid"
+geocode(start_location)
+
+remove.packages(c("ggmap", "ggplot2"))
+install.packages('Rcpp', dependencies = TRUE)
+install.packages('ggplot2', dependencies = TRUE)
+install.packages('ggmap', dependencies = TRUE)
+library(ggmap)
+devtools::install_github("dkahle/ggmap")
+devtools::install_github("hadley/ggplot2")
+legs_df <- route(from=start_location,to=end_location,mode = c("transit"),structure = c("route"),alternatives = TRUE)
+
+legs_df <- route(
+     ("40.45713,-3.7118128"),
+     ("40.439992,-3.6893769"),    
+     alternatives = TRUE
+ )
+
+pdf("multiple_routes.pdf")
+qmap("40.439992,-3.6893769", zoom = 14, maptype = "roadmap",
+base_layer = ggplot(aes(x = startLon, y = startLat), data = legs_df)) +
+geom_leg(
+aes(x = startLon, xend = endLon, y = startLat, yend = endLat,
+colour = route,type= route),
+alpha = 3/4, size = 2, data = legs_df
+) +
+labs(x = 'Longitude', y = 'Latitude', colour = 'Route')+
+ theme(legend.position = 'top')
+dev.off()
+transportation_start = "2017-03-24 12:04:30"
+#route A
+
+route_pm <-function(route="A"){
+        route_A = legs_df[legs_df$route==route,]
+route_A$startTime = as.POSIXct( "2017-03-24 12:04:30" , format = "%Y-%m-%d %H:%M:%S" , tz = "CET")
+route_A$endTime = as.POSIXct( "2017-03-24 12:04:30" , format = "%Y-%m-%d %H:%M:%S" , tz = "CET")
+
+for(i in 1:(nrow(route_A)-1)){
+        route_A$endTime[i] = route_A$startTime[i] + route_A$seconds[i]
+        route_A$startTime[i + 1] = route_A$endTime[i]
+}
+route_A$endTime[nrow(route_A)]=  route_A$startTime[nrow(route_A)] + route_A$seconds[nrow(route_A)]
+
+route_A$startTime_round <-0
+route_A$endTime_round <-0
+
+for (i in(1:nrow(route_A))){
+        route_A$startTime_round[i]<-as.integer(format(round.POSIXt(route_A$startTime[i], digits = c("hours")),format = '%H'))
+        route_A$endTime_round[i] <-as.integer(format(round.POSIXt(route_A$endTime[i], digits = c("hours")),format = '%H'))
+        }
+        
+        route_A$med_lon = (route_A$startLon + route_A$endLon)/2
+        route_A$med_lat = (route_A$startLat + route_A$endLat)/2
+        route_A$med_lon = round((route_A$med_lon),digits =3)
+        route_A$med_lat = round((route_A$med_lat),digits =3)
+        route_A$sum_pm = 0
+        for (i in 1:nrow(route_A)){
+                         Start_round = route_A$startTime_round[i]
+                         krig_location = get_kriging_time(Start_round,date) #kriging prediction at time Start_round
+                        
+                        round((krig_location[,"s2"]),digits =3)->krig_location[,"s2"]
+                        round((krig_location[,"s1"]),digits =3)->krig_location[,"s1"]
+                        #select the kriging prediction values in the location that the individual is located at time Start_round
+                        krig_pred = krig_location[krig_location[,"s1"]==route_A[i,"med_lat"]&krig_location[,"s2"]==route_A[i,"med_lon"],"var1.pred"]
+                        #the difference between start and end time points
+                        timeDiff = as.numeric(route_A$minutes[i]) # time difference in mins
+                        route_A[i,"sum_pm"] = krig_pred*timeDiff 
+                
+        }
+        route_A$pm_ve = 0            
+        route_A$pm_ve<- route_A$sum_pm*VE_transport 
+        sum(route_A$pm_ve)
+}
+
+route_pm("A")
+route_pm("B")
+route_pm("C")
+
+```
+
