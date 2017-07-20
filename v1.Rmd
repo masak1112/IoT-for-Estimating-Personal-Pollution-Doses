@@ -43,7 +43,7 @@ POLLUTANT_CODE = 8
 df_outdoor_indoor = function(DATE,POLLUTANT_CODE){
         #extract data from MySQL
         m=dbDriver("MySQL")
-        con<-dbConnect(m,user="cmadrid",password="tian.2016",dbname="madrid_pollution",host="138.100.82.183")
+        con<-dbConnect(m,user="cmadrid",password="***",dbname="***",host="***")
         start = DATE
         end = DATE
         
