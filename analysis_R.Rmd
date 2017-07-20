@@ -169,7 +169,6 @@ for(j in 2:nrow(indoor_test2))
 
 indoor_test3<-rbind(indoor_test2,indoor_test_new)
 indoor_test4<-indoor_test3[order(indoor_test3$datetime, decreasing = FALSE),]
-
 pdf(paste0(img_path,"indoor_exposure_min.pdf"),height = 6, width = 13)
 ggplot(indoor_test4,aes(x = datetime, y = ve_avg)) + geom_bar(stat="identity") +ylab("PM(ug)") + theme(axis.text.x= element_text( size = 16),axis.text.y= element_text( size = 16),text = element_text(size=18)) 
 dev.off()
@@ -235,18 +234,13 @@ ozone_Gau_fit = fit.variogram(ozone.vgm, model = vgm(600,"Gau",0.1,0.01))
 # #semivar_ml_vlues = variogramLine( vgm(700,"Gau",0.1,0.0001),0.1,10)
 # ozone_Sph_fit = fit.variogram(ozone.vgm, model = vgm(700,"Sph",0.1,nugget = -100))
 
-#ave images 
+#Save images 
 pdf(paste0(img_path,"Gau.pdf"))
 plot(ozone.vgm, model=ozone_Gau_fit,xlab=list(cex=2),ylab = list(cex= 2),main=list( cex=3))
 dev.off()
 #Choose gau as the fitting models
 ozone.krig = krige(value~1,t,grid,model = vgm(600,"Gau",0.1,0.01))
-
 plot(ozone.krig)
-
-
-
-
 
 ##find the optimal combination of parameters
 ensrmse<-unikrigrmse <- sipkrigrmse <- ordkrigrmse <- idwrmse <- rep(NA, 5)
