@@ -98,7 +98,7 @@ class create_new_sensor(object):
 #start = ""
 #end = ""
 #averageBy=""
-#USER = "gongbing1112@gmail.com"
+#USER = ""
 class Foobot(create_new_sensor):
 	
         def __init__(self, type_sensor,user,location,accept,api_token,start, end, averageBy):
